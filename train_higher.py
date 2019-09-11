@@ -227,7 +227,6 @@ def main():
             device, args.lr_update_frequency, args.num_lr_updates, args.num_lr_inner_steps, L
         )
         test(step, epoch, model, test_loader, device, L)
-        scheduler.step()
 
 
 if __name__ == '__main__':
