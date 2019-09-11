@@ -94,35 +94,34 @@ def make_dataloaders(batch_size=64, num_workers=4, pin_memory=True):
     return train_loader, train_lr_loader, test_loader
 
 
-def train_lr(model, lr, opt, inner_opt, data_loader, num_steps, device):
-    opt.zero_grad()
+def train_lr(model, lr, opt, lr_opt, data_loader, num_steps, device):
+    lr_opt.zero_grad()
     with higher.innerloop_ctx(
         model,
-        inner_opt,
+        opt,
         copy_initial_weights=False,
         track_higher_grads=True,
     ) as (fmodel, diffopt):
-        total_loss = 0
         for batch_idx, (x, y) in enumerate(data_loader):
             if batch_idx >= num_steps:
                 break
             x, y = x.to(device), y.to(device)
-            opt.zero_grad()
             y_hat = fmodel(x)
             loss = F.nll_loss(y_hat, y)
-            import ipdb; ipdb.set_trace()
-            new_params = diffopt.step(loss, override={'lr': lr})
-            total_loss += loss
-        import ipdb; ipdb.set_trace()
-        total_loss.backward()
-    opt.step()
+            diffopt.step(loss, override={'lr': lr})
+            
+        param_sum = sum(p.sum() for p in fmodel.parameters())
+        grad = torch.autograd.grad(param_sum, lr)
+        # need to manually set grad 
+        for (g, pg) in zip(grad, lr):
+            pg.grad = g
+    lr_opt.step()
 
 
 def train(
-    step, epoch, model, lr, data_loader, lr_data_loader, opt, inner_opt,
+    step, epoch, model, lr, data_loader, lr_data_loader, opt, lr_opt,
     device, lr_update_frequency, num_lr_updates, num_lr_inner_steps, L
 ):
-    import ipdb; ipdb.set_trace()
     model.train()
     start_time = time.time()
     for x, y in data_loader:
@@ -131,26 +130,22 @@ def train(
         if step % lr_update_frequency == 0:
             for _ in range(num_lr_updates):
                 train_lr(
-                    model, lr, opt, inner_opt, lr_data_loader,
+                    model, lr, opt, lr_opt, lr_data_loader,
                     num_lr_inner_steps, device
                 )
+            # set new learning rate for each param group
+            for lr_idx, (pg, g_lr) in enumerate(zip(opt.param_groups, lr)):
+                pg['lr'] = g_lr.item()
+                L.log('train/learning_rate_%d' % lr_idx, g_lr.item())
+                
 
         x, y = x.to(device), y.to(device)
         
-        inner_opt.zero_grad()
-        with higher.innerloop_ctx(
-            model,
-            inner_opt,
-            copy_initial_weights=False,
-            track_higher_grads=True,
-        ) as (fmodel, diffopt):
-
-            y_hat = fmodel(x)
-            loss = F.nll_loss(y_hat, y)
-            new_params = diffopt.step(loss, override={'lr': lr})
-            
+        opt.zero_grad()
+        y_hat = model(x)
+        loss = F.nll_loss(y_hat, y)
         loss.backward()
-        inner_opt.step()
+        opt.step()
 
         prediction = y_hat.max(1)[1]
         accuracy = prediction.eq(y).sum().item()
@@ -210,25 +205,25 @@ def main():
     model = model.to(device)
 
     param_groups = [{'params': p, 'lr': args.lr} for p in model.parameters()]
-    inner_opt = optim.SGD(
+    opt = optim.SGD(
         param_groups,
         lr=args.lr,
         momentum=args.momentum,
         weight_decay=args.weight_decay
     )
 
-    lr = [nn.Parameter(x) for x in higher.optim.get_trainable_opt_params(inner_opt)['lr']]
+    lr = nn.ParameterList([nn.Parameter(x.to(device)) for x in higher.optim.get_trainable_opt_params(opt)['lr']])
 
     train_loader, train_lr_loader, test_loader = make_dataloaders(
         batch_size=args.batch_size
     )
 
-    opt = optim.Adam(lr)
+    lr_opt = optim.Adam(lr)
 
     step = 0
     for epoch in range(1, args.num_epochs + 1):
         step = train(
-            step, epoch, model, lr, train_loader, train_lr_loader, opt, inner_opt,
+            step, epoch, model, lr, train_loader, train_lr_loader, opt, lr_opt,
             device, args.lr_update_frequency, args.num_lr_updates, args.num_lr_inner_steps, L
         )
         test(step, epoch, model, test_loader, device, L)
