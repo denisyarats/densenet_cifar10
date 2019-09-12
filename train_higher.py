@@ -113,7 +113,6 @@ def make_meta_loaders(batch_size=64, train_ratio=0.8):
     return train_loader, test_loader
 
 
-
 class MetaTrainer(object):
     def __init__(
         self, model, init_lr, momentum, weight_decay, batch_size,
@@ -123,7 +122,7 @@ class MetaTrainer(object):
         super().__init__()
 
         self.model = model.to(device)
-        
+
         self.meta_update_freq = meta_update_freq
         self.meta_num_updates = meta_num_updates
         self.meta_num_inner_steps = meta_num_inner_steps
@@ -142,7 +141,9 @@ class MetaTrainer(object):
             weight_decay=weight_decay
         )
 
-        self.learnable_lr =  higher.optim.get_trainable_opt_params(self.opt, device=self.device)['lr']
+        self.learnable_lr = higher.optim.get_trainable_opt_params(
+            self.opt, device=self.device
+        )['lr']
         self.lr_opt = optim.Adam(self.learnable_lr)
 
         self.train_loader, self.test_loader = make_loaders(batch_size)
@@ -174,18 +175,19 @@ class MetaTrainer(object):
                 x, y = x.to(self.device), y.to(self.device)
                 y_hat = fmodel(x)
                 test_loss += F.nll_loss(y_hat, y)
-            
-            grads = torch.autograd.grad(test_loss, self.learnable_lr)
+
+            #grads = torch.autograd.grad(test_loss, self.learnable_lr)
             # need to manually set grad
-            for param, grad in zip(self.learnable_lr, grads):
-                param.grad = grad
+            #for param, grad in zip(self.learnable_lr, grads):
+            #    param.grad = grad
+            test_loss.backward()
         self.lr_opt.step()
 
         # set new learning rate for each param group
-        for i, (group, lr) in enumerate(
-            zip(self.opt.param_groups, self.learnable_lr)
-        ):
-            group['lr'] = lr.item()
+        higher.optim.apply_trainable_opt_params(
+            self.opt, {'lr': self.learnable_lr}
+        )
+        for i, lr in enumerate(self.learnable_lr):
             L.log('train/learning_rate_%d' % i, lr.item())
 
     def train_iter(self, step, epoch, L):
