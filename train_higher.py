@@ -35,7 +35,7 @@ def module_hash(module):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', default=64, type=int)
-    parser.add_argument('--meta_batch_size', default=32, type=int)
+    parser.add_argument('--meta_batch_size', default=64, type=int)
     parser.add_argument('--num_epochs', default=300, type=int)
     parser.add_argument('--lr', default=1e-1, type=float)
     parser.add_argument('--momentum', default=0.9, type=float)
@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument('--seed', default=300, type=int)
     parser.add_argument('--pretrained', default=False, action='store_true')
     parser.add_argument('--work_dir', default='.', type=str)
-    parser.add_argument('--meta_update_freq', default=1, type=int)
+    parser.add_argument('--meta_update_freq', default=100, type=int)
     parser.add_argument('--meta_num_updates', default=1, type=int)
     parser.add_argument('--meta_num_inner_steps', default=1, type=int)
 
@@ -176,10 +176,6 @@ class MetaTrainer(object):
                 y_hat = fmodel(x)
                 test_loss += F.nll_loss(y_hat, y)
 
-            #grads = torch.autograd.grad(test_loss, self.learnable_lr)
-            # need to manually set grad
-            #for param, grad in zip(self.learnable_lr, grads):
-            #    param.grad = grad
             test_loss.backward()
         self.lr_opt.step()
 
@@ -215,7 +211,6 @@ class MetaTrainer(object):
             L.log('train/accuracy', 100. * accuracy / x.shape[0])
 
             if step % 100 == 0:
-                #L.log('train/learning_rate', scheduler.get_lr()[0])
                 L.log('train/duration', time.time() - start_time)
                 L.log('train/epoch', epoch)
                 L.dump(step)
@@ -262,7 +257,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = densenet.DenseNet(
-        growth_rate=16,
+        growth_rate=32,
         depth=100,
         reduction=0.5,
         bottleneck=True,
