@@ -56,7 +56,7 @@ def make_dataloaders(batch_size=64, num_workers=4, pin_memory=True):
     kwargs = {'num_workers': num_workers, 'pin_memory': pin_memory}
     train_loader = DataLoader(
         datasets.CIFAR10(
-            root='cifar10', train=True, download=True, transform=train_trans
+            root='cifar10', train=True, download=False, transform=train_trans
         ),
         batch_size=batch_size,
         shuffle=True,
@@ -64,7 +64,7 @@ def make_dataloaders(batch_size=64, num_workers=4, pin_memory=True):
     )
     test_loader = DataLoader(
         datasets.CIFAR10(
-            root='cifar10', train=False, download=True, transform=test_trans
+            root='cifar10', train=False, download=False, transform=test_trans
         ),
         batch_size=batch_size,
         shuffle=False,
@@ -89,18 +89,18 @@ def train(step, epoch, model, data_loader, opt, scheduler, device, L):
         prediction = y_hat.max(1)[1]
         accuracy = prediction.eq(y).sum().item()
 
-        L.log('train/loss', loss)
-        L.log('train/accuracy', 100. * accuracy / x.shape[0])
+        L.log('train/loss', loss, step)
+        L.log('train/accuracy', 100. * accuracy / x.shape[0], step)
 
         if step % 100 == 0:
-            L.log('train/learning_rate', scheduler.get_lr()[0])
-            L.log('train/duration', time.time() - start_time)
-            L.log('train/epoch', epoch)
+            L.log_histogram('train/learning_rate', np.array(scheduler.get_lr()), step)
+            L.log('train/duration', time.time() - start_time, step)
+            L.log('train/epoch', epoch, step)
             L.dump(step)
             start_time = time.time()
 
-    L.log('train/duration', time.time() - start_time)
-    L.log('train/epoch', epoch)
+    L.log('train/duration', time.time() - start_time, step)
+    L.log('train/epoch', epoch, step)
     L.dump(step)
 
     return step
@@ -116,10 +116,10 @@ def test(step, epoch, model, data_loader, device, L):
         prediction = y_hat.max(1)[1]
         accuracy = prediction.eq(y).sum().item()
 
-        L.log('test/loss', loss, n=x.shape[0])
-        L.log('test/accuracy', 100. * accuracy, n=x.shape[0])
+        L.log('test/loss', loss, step, n=x.shape[0])
+        L.log('test/accuracy', 100. * accuracy, step, n=x.shape[0])
 
-    L.log('test/epoch', epoch)
+    L.log('test/epoch', epoch, step)
     L.dump(step)
 
 
@@ -131,7 +131,7 @@ def main():
     np.random.seed(args.seed)
 
     work_dir = make_dir(args.work_dir)
-    L = Logger(work_dir)
+    L = Logger(work_dir, use_tb=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = densenet.DenseNet(

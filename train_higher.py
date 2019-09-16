@@ -160,6 +160,7 @@ class MetaTrainer(object):
             track_higher_grads=True,
             override={'lr': self.learnable_lr}
         ) as (fmodel, diffopt):
+            # meta train step
             for batch_idx, (x, y) in enumerate(self.meta_train_loader):
                 if batch_idx >= self.meta_num_inner_steps:
                     break
@@ -168,6 +169,7 @@ class MetaTrainer(object):
                 loss = F.nll_loss(y_hat, y)
                 diffopt.step(loss)
 
+            # meta test step
             test_loss = 0
             for batch_idx, (x, y) in enumerate(self.meta_test_loader):
                 if batch_idx >= self.meta_num_inner_steps:
@@ -183,8 +185,8 @@ class MetaTrainer(object):
         higher.optim.apply_trainable_opt_params(
             self.opt, {'lr': self.learnable_lr}
         )
-        for i, lr in enumerate(self.learnable_lr):
-            L.log('train/learning_rate_%d' % i, lr.item())
+        lrs = np.array([lr.item() for lr in self.learnable_lr])
+        L.log_histogram('train/learning_rate', lrs, step)
 
     def train_iter(self, step, epoch, L):
         self.model.train()
@@ -207,17 +209,17 @@ class MetaTrainer(object):
             prediction = y_hat.max(1)[1]
             accuracy = prediction.eq(y).sum().item()
 
-            L.log('train/loss', loss)
-            L.log('train/accuracy', 100. * accuracy / x.shape[0])
+            L.log('train/loss', loss, step)
+            L.log('train/accuracy', 100. * accuracy / x.shape[0], step)
 
             if step % 100 == 0:
-                L.log('train/duration', time.time() - start_time)
-                L.log('train/epoch', epoch)
+                L.log('train/duration', time.time() - start_time, step)
+                L.log('train/epoch', epoch, step)
                 L.dump(step)
                 start_time = time.time()
 
-        L.log('train/duration', time.time() - start_time)
-        L.log('train/epoch', epoch)
+        L.log('train/duration', time.time() - start_time, step)
+        L.log('train/epoch', epoch, step)
         L.dump(step)
 
         return step
@@ -232,16 +234,16 @@ class MetaTrainer(object):
             prediction = y_hat.max(1)[1]
             accuracy = prediction.eq(y).sum().item()
 
-            L.log('test/loss', loss, n=x.shape[0])
-            L.log('test/accuracy', 100. * accuracy, n=x.shape[0])
+            L.log('test/loss', loss, step, n=x.shape[0])
+            L.log('test/accuracy', 100. * accuracy, step, n=x.shape[0])
 
-        L.log('test/epoch', epoch)
+        L.log('test/epoch', epoch, step)
         L.dump(step)
 
     def train(self, num_epochs, L):
         step = 0
         for epoch in range(1, num_epochs + 1):
-            self.train_iter(step, epoch, L)
+            step = self.train_iter(step, epoch, L)
             self.test_iter(step, epoch, L)
 
 
@@ -253,7 +255,7 @@ def main():
     np.random.seed(args.seed)
 
     work_dir = make_dir(args.work_dir)
-    L = Logger(work_dir)
+    L = Logger(work_dir, use_tb=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = densenet.DenseNet(
