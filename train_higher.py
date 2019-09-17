@@ -7,6 +7,7 @@ import os
 from torch import optim
 from torch.optim import lr_scheduler
 import argparse
+import uuid
 
 import torchvision.transforms as tr
 import torchvision.datasets as datasets
@@ -15,6 +16,9 @@ from torch.utils.data import DataLoader
 from logger import Logger
 import densenet
 import higher
+
+DATA_FOLDER = '/private/home/denisy/workspace/research/densenet_cifar10/cifar10'
+
 
 
 def make_dir(dir_path):
@@ -35,17 +39,16 @@ def module_hash(module):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', default=64, type=int)
-    parser.add_argument('--meta_batch_size', default=64, type=int)
+    parser.add_argument('--meta_batch_size', default=32, type=int)
     parser.add_argument('--num_epochs', default=300, type=int)
     parser.add_argument('--lr', default=1e-1, type=float)
     parser.add_argument('--momentum', default=0.9, type=float)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--seed', default=300, type=int)
-    parser.add_argument('--pretrained', default=False, action='store_true')
     parser.add_argument('--work_dir', default='.', type=str)
-    parser.add_argument('--meta_update_freq', default=100, type=int)
-    parser.add_argument('--meta_num_updates', default=1, type=int)
+    #parser.add_argument('--meta_num_updates', default=0, type=int)
     parser.add_argument('--meta_num_inner_steps', default=1, type=int)
+    parser.add_argument('--anneal_gamma', default=1., type=float)
 
     args = parser.parse_args()
     return args
@@ -70,7 +73,7 @@ def make_dataset(train=True):
     transform = make_transform(train)
 
     dataset = datasets.CIFAR10(
-        root='cifar10', train=train, download=True, transform=transform
+        root=DATA_FOLDER, train=train, download=True, transform=transform
     )
     return dataset
 
@@ -79,7 +82,7 @@ def make_loaders(batch_size=64):
     train_dset = make_dataset(train=True)
     test_dset = make_dataset(train=False)
 
-    kwargs = {'num_workers': 4, 'pin_memory': True}
+    kwargs = {'num_workers': 0, 'pin_memory': True}
 
     train_loader = DataLoader(
         train_dset, batch_size=batch_size, shuffle=True, **kwargs
@@ -91,7 +94,7 @@ def make_loaders(batch_size=64):
     return train_loader, test_loader
 
 
-def make_meta_loaders(batch_size=64, train_ratio=0.8):
+def make_meta_loaders(batch_size=64, train_ratio=0.5):
     dataset = make_dataset(train=True)
 
     train_size = int(len(dataset) * train_ratio)
@@ -101,7 +104,7 @@ def make_meta_loaders(batch_size=64, train_ratio=0.8):
         dataset, [train_size, test_size]
     )
 
-    kwargs = {'num_workers': 4, 'pin_memory': True}
+    kwargs = {'num_workers': 0, 'pin_memory': True}
 
     train_loader = DataLoader(
         train_dset, batch_size=batch_size, shuffle=True, **kwargs
@@ -116,16 +119,16 @@ def make_meta_loaders(batch_size=64, train_ratio=0.8):
 class MetaTrainer(object):
     def __init__(
         self, model, init_lr, momentum, weight_decay, batch_size,
-        meta_batch_size, meta_update_freq, meta_num_updates,
-        meta_num_inner_steps, device
+        meta_batch_size, meta_num_inner_steps, anneal_gamma, device
     ):
         super().__init__()
 
         self.model = model.to(device)
 
-        self.meta_update_freq = meta_update_freq
-        self.meta_num_updates = meta_num_updates
+        #self.meta_update_freq = meta_update_freq
+        #self.meta_num_updates = meta_num_updates
         self.meta_num_inner_steps = meta_num_inner_steps
+        self.anneal_gamma = anneal_gamma
         self.device = device
 
         param_groups = [
@@ -154,49 +157,55 @@ class MetaTrainer(object):
     def meta_train_iter(self, step, epoch, L):
         self.lr_opt.zero_grad()
         with higher.innerloop_ctx(
-            self.model,
-            self.opt,
-            copy_initial_weights=False,
-            track_higher_grads=True,
-            override={'lr': self.learnable_lr}
+                self.model,
+                self.opt,
+                copy_initial_weights=True,
+                track_higher_grads=True,
+                override={'lr': self.learnable_lr}
         ) as (fmodel, diffopt):
-            # meta train step
-            for batch_idx, (x, y) in enumerate(self.meta_train_loader):
-                if batch_idx >= self.meta_num_inner_steps:
+            for i, (train_x, train_y) in enumerate(self.meta_train_loader):
+                if i >= self.meta_num_inner_steps:
                     break
-                x, y = x.to(self.device), y.to(self.device)
-                y_hat = fmodel(x)
-                loss = F.nll_loss(y_hat, y)
-                diffopt.step(loss)
-
-            # meta test step
+                train_x, train_y = train_x.to(self.device), train_y.to(self.device)
+                # meta train step
+                train_y_hat = fmodel(train_x)
+                train_loss = F.nll_loss(train_y_hat, train_y)
+                diffopt.step(train_loss)
+                
             test_loss = 0
-            for batch_idx, (x, y) in enumerate(self.meta_test_loader):
-                if batch_idx >= self.meta_num_inner_steps:
+            for i, (test_x, test_y) in enumerate(self.meta_test_loader):
+                if i >= self.meta_num_inner_steps:
                     break
-                x, y = x.to(self.device), y.to(self.device)
-                y_hat = fmodel(x)
-                test_loss += F.nll_loss(y_hat, y)
+                test_x, test_y = test_x.to(self.device), test_y.to(self.device)
+                # meta test step
+                test_y_hat = fmodel(test_x)
+                test_loss += F.nll_loss(test_y_hat, test_y)
+                
+            if self.meta_num_inner_steps > 0:
+                test_loss.backward()
 
-            test_loss.backward()
         self.lr_opt.step()
+            
+        # set minimum lr
+        for lr in self.learnable_lr:
+            lr.data.clamp_min_(0.001)
 
         # set new learning rate for each param group
         higher.optim.apply_trainable_opt_params(
             self.opt, {'lr': self.learnable_lr}
         )
         lrs = np.array([lr.item() for lr in self.learnable_lr])
-        L.log_histogram('train/learning_rate', lrs, step)
+        print(lrs)
+        try:
+            L.log_histogram('train/learning_rate', lrs, step)
+        except:
+            pass
 
     def train_iter(self, step, epoch, L):
         self.model.train()
         start_time = time.time()
         for x, y in self.train_loader:
             step += 1
-
-            if step % self.meta_update_freq == 0:
-                for _ in range(self.meta_num_updates):
-                    self.meta_train_iter(step, epoch, L)
 
             x, y = x.to(self.device), y.to(self.device)
 
@@ -224,6 +233,13 @@ class MetaTrainer(object):
 
         return step
 
+    def anneal_lr(self, epoch):
+        if epoch in [150, 225]:
+            for lr in self.learnable_lr:
+                lr.data.mul_(self.anneal_gamma)
+            # reset adam
+            self.lr_opt = optim.Adam(self.learnable_lr)
+
     def test_iter(self, step, epoch, L):
         self.model.eval()
         for x, y in self.test_loader:
@@ -246,6 +262,9 @@ class MetaTrainer(object):
             step = self.train_iter(step, epoch, L)
             self.test_iter(step, epoch, L)
 
+            self.meta_train_iter(step, epoch, L)
+            self.anneal_lr(epoch)
+
 
 def main():
     args = parse_args()
@@ -259,7 +278,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = densenet.DenseNet(
-        growth_rate=32,
+        growth_rate=12,
         depth=100,
         reduction=0.5,
         bottleneck=True,
@@ -274,9 +293,9 @@ def main():
         weight_decay=args.weight_decay,
         batch_size=args.batch_size,
         meta_batch_size=args.meta_batch_size,
-        meta_update_freq=args.meta_update_freq,
-        meta_num_updates=args.meta_num_updates,
+        #meta_num_updates=args.meta_num_updates,
         meta_num_inner_steps=args.meta_num_inner_steps,
+        anneal_gamma=args.anneal_gamma,
         device=device
     )
 
