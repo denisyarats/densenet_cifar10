@@ -48,6 +48,7 @@ def parse_args():
     parser.add_argument('--work_dir', default='.', type=str)
     #parser.add_argument('--meta_num_updates', default=0, type=int)
     parser.add_argument('--meta_num_inner_steps', default=1, type=int)
+    parser.add_argument('--meta_grad_clip', default=10, type=float)
     parser.add_argument('--anneal_gamma', default=1., type=float)
 
     args = parser.parse_args()
@@ -119,7 +120,7 @@ def make_meta_loaders(batch_size=64, train_ratio=0.5):
 class MetaTrainer(object):
     def __init__(
         self, model, init_lr, momentum, weight_decay, batch_size,
-        meta_batch_size, meta_num_inner_steps, anneal_gamma, device
+        meta_batch_size, meta_num_inner_steps, meta_grad_clip, anneal_gamma, device
     ):
         super().__init__()
 
@@ -128,6 +129,7 @@ class MetaTrainer(object):
         #self.meta_update_freq = meta_update_freq
         #self.meta_num_updates = meta_num_updates
         self.meta_num_inner_steps = meta_num_inner_steps
+        self.meta_grad_clip = meta_grad_clip
         self.anneal_gamma = anneal_gamma
         self.device = device
 
@@ -169,7 +171,7 @@ class MetaTrainer(object):
                 train_x, train_y = train_x.to(self.device), train_y.to(self.device)
                 # meta train step
                 train_y_hat = fmodel(train_x)
-                train_loss = F.nll_loss(train_y_hat, train_y)
+                train_loss = F.cross_entropy(train_y_hat, train_y)
                 diffopt.step(train_loss)
                 
             test_loss = 0
@@ -179,11 +181,12 @@ class MetaTrainer(object):
                 test_x, test_y = test_x.to(self.device), test_y.to(self.device)
                 # meta test step
                 test_y_hat = fmodel(test_x)
-                test_loss += F.nll_loss(test_y_hat, test_y)
+                test_loss += F.cross_entropy(test_y_hat, test_y)
                 
             if self.meta_num_inner_steps > 0:
                 test_loss.backward()
 
+        torch.nn.utils.clip_grad_norm_(self.learnable_lr, self.meta_grad_clip)
         self.lr_opt.step()
             
         # set minimum lr
@@ -195,11 +198,7 @@ class MetaTrainer(object):
             self.opt, {'lr': self.learnable_lr}
         )
         lrs = np.array([lr.item() for lr in self.learnable_lr])
-        print(lrs)
-        try:
-            L.log_histogram('train/learning_rate', lrs, step)
-        except:
-            pass
+        L.log_histogram('train/learning_rate', lrs, step)
 
     def train_iter(self, step, epoch, L):
         self.model.train()
@@ -211,7 +210,7 @@ class MetaTrainer(object):
 
             self.opt.zero_grad()
             y_hat = self.model(x)
-            loss = F.nll_loss(y_hat, y)
+            loss = F.cross_entropy(y_hat, y)
             loss.backward()
             self.opt.step()
 
@@ -246,7 +245,7 @@ class MetaTrainer(object):
             x, y = x.to(self.device), y.to(self.device)
             with torch.no_grad():
                 y_hat = self.model(x)
-            loss = F.nll_loss(y_hat, y, reduction='sum')
+            loss = F.cross_entropy(y_hat, y, reduction='sum')
             prediction = y_hat.max(1)[1]
             accuracy = prediction.eq(y).sum().item()
 
@@ -295,6 +294,7 @@ def main():
         meta_batch_size=args.meta_batch_size,
         #meta_num_updates=args.meta_num_updates,
         meta_num_inner_steps=args.meta_num_inner_steps,
+        meta_grad_clip=args.meta_grad_clip,
         anneal_gamma=args.anneal_gamma,
         device=device
     )
