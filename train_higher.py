@@ -155,8 +155,50 @@ class MetaTrainer(object):
         self.meta_train_loader, self.meta_test_loader = make_meta_loaders(
             meta_batch_size
         )
-
+        
     def meta_train_iter(self, step, epoch, L):
+        self.lr_opt.zero_grad()
+
+        
+        train_x, train_y = iter(self.meta_train_loader).next()
+        test_x, test_y = iter(self.meta_test_loader).next()
+        train_x, train_y = train_x.to(self.device), train_y.to(self.device)
+        test_x, test_y = test_x.to(self.device), test_y.to(self.device)
+        
+        with higher.innerloop_ctx(
+                self.model,
+                self.opt,
+                copy_initial_weights=True,
+                track_higher_grads=True,
+                override={'lr': self.learnable_lr}
+        ) as (fmodel, diffopt):
+            for i in range(self.meta_num_inner_steps):
+                # meta train step
+                train_y_hat = fmodel(train_x)
+                train_loss = F.cross_entropy(train_y_hat, train_y)
+                diffopt.step(train_loss)
+             
+            # meta test step
+            if self.meta_num_inner_steps > 0:
+                test_y_hat = fmodel(test_x)
+                test_loss = F.cross_entropy(test_y_hat, test_y)
+                test_loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(self.learnable_lr, self.meta_grad_clip)
+        self.lr_opt.step()
+            
+        # set minimum lr
+        for lr in self.learnable_lr:
+            lr.data.clamp_min_(0.001)
+
+        # set new learning rate for each param group
+        higher.optim.apply_trainable_opt_params(
+            self.opt, {'lr': self.learnable_lr}
+        )
+        lrs = np.array([lr.item() for lr in self.learnable_lr])
+        L.log_histogram('train/learning_rate', lrs, step)
+
+    def meta_train_iter_old(self, step, epoch, L):
         self.lr_opt.zero_grad()
         with higher.innerloop_ctx(
                 self.model,
@@ -165,6 +207,7 @@ class MetaTrainer(object):
                 track_higher_grads=True,
                 override={'lr': self.learnable_lr}
         ) as (fmodel, diffopt):
+            import ipdb; ipdb.set_trace()
             for i, (train_x, train_y) in enumerate(self.meta_train_loader):
                 if i >= self.meta_num_inner_steps:
                     break
