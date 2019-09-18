@@ -39,7 +39,7 @@ def module_hash(module):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', default=64, type=int)
-    parser.add_argument('--meta_batch_size', default=32, type=int)
+    parser.add_argument('--meta_batch_size', default=64, type=int)
     parser.add_argument('--num_epochs', default=300, type=int)
     parser.add_argument('--lr', default=1e-1, type=float)
     parser.add_argument('--momentum', default=0.9, type=float)
@@ -48,7 +48,7 @@ def parse_args():
     parser.add_argument('--work_dir', default='.', type=str)
     #parser.add_argument('--meta_num_updates', default=0, type=int)
     parser.add_argument('--meta_num_inner_steps', default=1, type=int)
-    parser.add_argument('--meta_grad_clip', default=10, type=float)
+    parser.add_argument('--meta_grad_clip', default=100, type=float)
     parser.add_argument('--anneal_gamma', default=1., type=float)
 
     args = parser.parse_args()
@@ -95,7 +95,7 @@ def make_loaders(batch_size=64):
     return train_loader, test_loader
 
 
-def make_meta_loaders(batch_size=64, train_ratio=0.5):
+def make_meta_loaders(batch_size=64, train_ratio=0.8):
     dataset = make_dataset(train=True)
 
     train_size = int(len(dataset) * train_ratio)
@@ -132,6 +132,7 @@ class MetaTrainer(object):
         self.meta_grad_clip = meta_grad_clip
         self.anneal_gamma = anneal_gamma
         self.device = device
+        self.unroll_device = torch.device('cpu')
 
         param_groups = [
             {
@@ -147,7 +148,7 @@ class MetaTrainer(object):
         )
 
         self.learnable_lr = higher.optim.get_trainable_opt_params(
-            self.opt, device=self.device
+            self.opt, device=self.unroll_device
         )['lr']
         self.lr_opt = optim.Adam(self.learnable_lr)
 
@@ -155,63 +156,22 @@ class MetaTrainer(object):
         self.meta_train_loader, self.meta_test_loader = make_meta_loaders(
             meta_batch_size
         )
-        
+
     def meta_train_iter(self, step, epoch, L):
-        self.lr_opt.zero_grad()
-
-        
-        train_x, train_y = iter(self.meta_train_loader).next()
-        test_x, test_y = iter(self.meta_test_loader).next()
-        train_x, train_y = train_x.to(self.device), train_y.to(self.device)
-        test_x, test_y = test_x.to(self.device), test_y.to(self.device)
-        
-        with higher.innerloop_ctx(
-                self.model,
-                self.opt,
-                copy_initial_weights=True,
-                track_higher_grads=True,
-                override={'lr': self.learnable_lr}
-        ) as (fmodel, diffopt):
-            for i in range(self.meta_num_inner_steps):
-                # meta train step
-                train_y_hat = fmodel(train_x)
-                train_loss = F.cross_entropy(train_y_hat, train_y)
-                diffopt.step(train_loss)
-             
-            # meta test step
-            if self.meta_num_inner_steps > 0:
-                test_y_hat = fmodel(test_x)
-                test_loss = F.cross_entropy(test_y_hat, test_y)
-                test_loss.backward()
-
-        torch.nn.utils.clip_grad_norm_(self.learnable_lr, self.meta_grad_clip)
-        self.lr_opt.step()
-            
-        # set minimum lr
-        for lr in self.learnable_lr:
-            lr.data.clamp_min_(0.001)
-
-        # set new learning rate for each param group
-        higher.optim.apply_trainable_opt_params(
-            self.opt, {'lr': self.learnable_lr}
-        )
-        lrs = np.array([lr.item() for lr in self.learnable_lr])
-        L.log_histogram('train/learning_rate', lrs, step)
-
-    def meta_train_iter_old(self, step, epoch, L):
+        self.model.train()
         self.lr_opt.zero_grad()
         with higher.innerloop_ctx(
                 self.model,
                 self.opt,
                 copy_initial_weights=True,
                 track_higher_grads=True,
+                device=self.unroll_device,
                 override={'lr': self.learnable_lr}
         ) as (fmodel, diffopt):
-            import ipdb; ipdb.set_trace()
             for i, (train_x, train_y) in enumerate(self.meta_train_loader):
                 if i >= self.meta_num_inner_steps:
                     break
-                train_x, train_y = train_x.to(self.device), train_y.to(self.device)
+                train_x, train_y = train_x.to(self.unroll_device), train_y.to(self.unroll_device)
                 # meta train step
                 train_y_hat = fmodel(train_x)
                 train_loss = F.cross_entropy(train_y_hat, train_y)
@@ -221,7 +181,7 @@ class MetaTrainer(object):
             for i, (test_x, test_y) in enumerate(self.meta_test_loader):
                 if i >= self.meta_num_inner_steps:
                     break
-                test_x, test_y = test_x.to(self.device), test_y.to(self.device)
+                test_x, test_y = test_x.to(self.unroll_device), test_y.to(self.unroll_device)
                 # meta test step
                 test_y_hat = fmodel(test_x)
                 test_loss += F.cross_entropy(test_y_hat, test_y)
