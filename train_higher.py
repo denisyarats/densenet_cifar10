@@ -47,7 +47,8 @@ def parse_args():
     parser.add_argument('--seed', default=300, type=int)
     parser.add_argument('--work_dir', default='.', type=str)
     #parser.add_argument('--meta_num_updates', default=0, type=int)
-    parser.add_argument('--meta_num_inner_steps', default=1, type=int)
+    parser.add_argument('--meta_num_train_steps', default=1, type=int)
+    parser.add_argument('--meta_num_test_steps', default=1, type=int)
     parser.add_argument('--meta_grad_clip', default=100, type=float)
     parser.add_argument('--anneal_gamma', default=1., type=float)
 
@@ -120,7 +121,7 @@ def make_meta_loaders(batch_size=64, train_ratio=0.8):
 class MetaTrainer(object):
     def __init__(
         self, model, init_lr, momentum, weight_decay, batch_size,
-        meta_batch_size, meta_num_inner_steps, meta_grad_clip, anneal_gamma, device
+        meta_batch_size, meta_num_train_steps, meta_num_test_steps, meta_grad_clip, anneal_gamma, device
     ):
         super().__init__()
 
@@ -128,11 +129,12 @@ class MetaTrainer(object):
 
         #self.meta_update_freq = meta_update_freq
         #self.meta_num_updates = meta_num_updates
-        self.meta_num_inner_steps = meta_num_inner_steps
+        self.meta_num_train_steps = meta_num_train_steps
+        self.meta_num_test_steps = meta_num_test_steps
         self.meta_grad_clip = meta_grad_clip
         self.anneal_gamma = anneal_gamma
         self.device = device
-        self.unroll_device = torch.device('cpu')
+        self.unroll_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         param_groups = [
             {
@@ -160,6 +162,7 @@ class MetaTrainer(object):
     def meta_train_iter(self, step, epoch, L):
         self.model.train()
         self.lr_opt.zero_grad()
+        start_time = time.time()
         with higher.innerloop_ctx(
                 self.model,
                 self.opt,
@@ -168,26 +171,31 @@ class MetaTrainer(object):
                 device=self.unroll_device,
                 override={'lr': self.learnable_lr}
         ) as (fmodel, diffopt):
+            train_loss = 0
             for i, (train_x, train_y) in enumerate(self.meta_train_loader):
-                if i >= self.meta_num_inner_steps:
+                if i >= self.meta_num_train_steps:
                     break
                 train_x, train_y = train_x.to(self.unroll_device), train_y.to(self.unroll_device)
                 # meta train step
                 train_y_hat = fmodel(train_x)
-                train_loss = F.cross_entropy(train_y_hat, train_y)
+                loss = F.cross_entropy(train_y_hat, train_y)
+                train_loss += loss
                 diffopt.step(train_loss)
                 
             test_loss = 0
             for i, (test_x, test_y) in enumerate(self.meta_test_loader):
-                if i >= self.meta_num_inner_steps:
+                if i >= self.meta_num_test_steps:
                     break
                 test_x, test_y = test_x.to(self.unroll_device), test_y.to(self.unroll_device)
                 # meta test step
                 test_y_hat = fmodel(test_x)
                 test_loss += F.cross_entropy(test_y_hat, test_y)
                 
-            if self.meta_num_inner_steps > 0:
+            if self.meta_num_test_steps > 0:
                 test_loss.backward()
+                
+            L.log('meta/train_loss', train_loss.item() / self.meta_num_train_steps , step)
+            L.log('meta/test_loss', test_loss.item() / self.meta_num_test_steps , step)
 
         torch.nn.utils.clip_grad_norm_(self.learnable_lr, self.meta_grad_clip)
         self.lr_opt.step()
@@ -201,7 +209,11 @@ class MetaTrainer(object):
             self.opt, {'lr': self.learnable_lr}
         )
         lrs = np.array([lr.item() for lr in self.learnable_lr])
-        L.log_histogram('train/learning_rate', lrs, step)
+        L.log_histogram('meta/learning_rate', lrs, step)
+        
+        L.log('meta/duration', time.time() - start_time, step)
+        L.log('meta/epoch', epoch, step)
+        L.dump(step)
 
     def train_iter(self, step, epoch, L):
         self.model.train()
@@ -295,8 +307,8 @@ def main():
         weight_decay=args.weight_decay,
         batch_size=args.batch_size,
         meta_batch_size=args.meta_batch_size,
-        #meta_num_updates=args.meta_num_updates,
-        meta_num_inner_steps=args.meta_num_inner_steps,
+        meta_num_train_steps=args.meta_num_train_steps,
+        meta_num_test_steps=args.meta_num_test_steps,
         meta_grad_clip=args.meta_grad_clip,
         anneal_gamma=args.anneal_gamma,
         device=device

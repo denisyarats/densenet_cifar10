@@ -19,7 +19,11 @@ FORMAT_CONFIG = {
         'test': [
             ('step', 'T', 'int'), ('epoch', 'E', 'int'), ('loss', 'L', 'float'),
             ('accuracy', 'A', 'float')
-        ]
+        ],
+        'meta': [
+            ('step', 'T', 'int'), ('epoch', 'E', 'int'), ('duration', 'D', 'time'),
+            ('train_loss', 'TL', 'float'), ('test_loss', 'VL', 'float')
+        ],
     }
 }
 
@@ -53,8 +57,10 @@ class MetersGroup(object):
         for key, meter in self._meters.items():
             if key.startswith('train'):
                 key = key[len('train') + 1:]
-            else:
+            elif key.startswith('test'):
                 key = key[len('test') + 1:]
+            else:
+                key = key[len('meta') + 1:]
             key = key.replace('/', '_')
             data[key] = meter.value()
         return data
@@ -76,7 +82,13 @@ class MetersGroup(object):
         return template % (key, value)
 
     def _dump_to_console(self, data, prefix):
-        prefix = colored(prefix, 'yellow' if prefix == 'train' else 'green')
+        if prefix == 'train':
+            color = 'yellow'
+        elif prefix == 'test':
+            color = 'green'
+        else:
+            color = 'blue'
+        prefix = colored(prefix, color)
         pieces = ['{:5}'.format(prefix)]
         for key, disp_key, ty in self._formating:
             value = data.get(key, 0)
@@ -109,6 +121,9 @@ class Logger(object):
         self._test_mg = MetersGroup(
             os.path.join(log_dir, 'test.log'),
             formating=FORMAT_CONFIG[config]['test'])
+        self._meta_mg = MetersGroup(
+            os.path.join(log_dir, 'meta.log'),
+            formating=FORMAT_CONFIG[config]['meta'])
 
     def _try_sw_log(self, key, value, step):
         if self._sw is not None:
@@ -131,11 +146,16 @@ class Logger(object):
             self._sw.add_histogram(key, histogram, step)
 
     def log(self, key, value, step, n=1):
-        assert key.startswith('train') or key.startswith('test')
+        assert key.startswith('train') or key.startswith('test') or key.startswith('meta')
         if type(value) == torch.Tensor:
             value = value.item()
         self._try_sw_log(key, value / n, step)
-        mg = self._train_mg if key.startswith('train') else self._test_mg
+        if key.startswith('train'):
+            mg = self._train_mg
+        elif key.startswith('test'):
+            mg = self._test_mg
+        else:
+            mg = self._meta_mg
         mg.log(key, value, n)
 
     def log_param(self, key, param, step):
@@ -148,17 +168,18 @@ class Logger(object):
                 self.log_histogram(key + '_b_g', param.bias.grad.data, step)
 
     def log_image(self, key, image, step):
-        assert key.startswith('train') or key.startswith('test')
+        assert key.startswith('train') or key.startswith('test') or key.startswith('meta')
         self._try_sw_log_image(key, image, step)
 
     def log_video(self, key, frames, step):
-        assert key.startswith('train') or key.startswith('test')
+        assert key.startswith('train') or key.startswith('test') or key.startswith('meta')
         self._try_sw_log_video(key, frames, step)
 
     def log_histogram(self, key, histogram, step):
-        assert key.startswith('train') or key.startswith('test')
+        assert key.startswith('train') or key.startswith('test') or key.startswith('meta')
         self._try_sw_log_histogram(key, histogram, step)
 
     def dump(self, step):
         self._train_mg.dump(step, 'train')
         self._test_mg.dump(step, 'test')
+        self._meta_mg.dump(step, 'meta')
