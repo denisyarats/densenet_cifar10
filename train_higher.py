@@ -243,7 +243,7 @@ class MetaTrainer(object):
         lrs = np.array([lr.item() for lr in self.learnable_lr])
         L.log_histogram('meta/learning_rate', lrs, step)
         for i, lr in enumerate(lrs):
-            L.log('train/lr_%d' % i, lr, step)
+            L.log('meta/lr_%d' % i, lr, step)
 
         L.log('meta/duration', time.time() - start_time, step)
         L.log('meta/epoch', epoch, step)
