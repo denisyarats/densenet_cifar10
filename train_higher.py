@@ -12,13 +12,13 @@ import uuid
 import torchvision.transforms as tr
 import torchvision.datasets as datasets
 from torch.utils.data import DataLoader
+from torch.utils.data.sampler import SubsetRandomSampler
 
 from logger import Logger
 import densenet
 import higher
 
 DATA_FOLDER = '/private/home/denisy/workspace/research/densenet_cifar10/cifar10'
-
 
 
 def make_dir(dir_path):
@@ -46,22 +46,21 @@ def parse_args():
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--seed', default=300, type=int)
     parser.add_argument('--work_dir', default='.', type=str)
-    #parser.add_argument('--meta_num_updates', default=0, type=int)
     parser.add_argument('--meta_num_train_steps', default=1, type=int)
     parser.add_argument('--meta_num_test_steps', default=1, type=int)
     parser.add_argument('--meta_grad_clip', default=100, type=float)
-    parser.add_argument('--anneal_gamma', default=1., type=float)
+    parser.add_argument('--split_ratio', default=0.05, type=float)
 
     args = parser.parse_args()
     return args
 
 
-def make_transform(train=True):
+def make_transform(augument):
     means = [0.53129727, 0.5259391, 0.52069134]
     stdevs = [0.28938246, 0.28505746, 0.27971658]
 
     transforms = []
-    if train:
+    if augument:
         transforms.append(tr.RandomCrop(32, padding=4))
         transforms.append(tr.RandomHorizontalFlip())
 
@@ -71,71 +70,91 @@ def make_transform(train=True):
     return tr.Compose(transforms)
 
 
-def make_dataset(train=True):
-    transform = make_transform(train)
+def make_loaders(batch_size, meta_batch_size, split_ratio=0.05):
+    train_trans = make_transform(augument=True)
+    valid_trans = make_transform(augument=False)
+    test_trans = make_transform(augument=False)
 
-    dataset = datasets.CIFAR10(
-        root=DATA_FOLDER, train=train, download=True, transform=transform
+    train_dataset = datasets.CIFAR10(
+        root=DATA_FOLDER,
+        train=True,
+        download=True,
+        transform=train_trans,
     )
-    return dataset
 
+    valid_dataset = datasets.CIFAR10(
+        root=DATA_FOLDER,
+        train=True,
+        download=True,
+        transform=valid_trans,
+    )
 
-def make_loaders(batch_size=64):
-    train_dset = make_dataset(train=True)
-    test_dset = make_dataset(train=False)
+    test_dataset = datasets.CIFAR10(
+        root=DATA_FOLDER,
+        train=False,
+        download=True,
+        transform=test_trans,
+    )
 
-    kwargs = {'num_workers': 0, 'pin_memory': True}
+    split_size = int(len(train_dataset) * (1 - split_ratio))
+    
+
+    idxs = np.random.permutation(len(train_dataset))
+    train_idxs = idxs[:split_size]
+    valid_idxs = idxs[split_size:]
+    
+    train_sampler = SubsetRandomSampler(train_idxs)
+    valid_sampler = SubsetRandomSampler(valid_idxs)
 
     train_loader = DataLoader(
-        train_dset, batch_size=batch_size, shuffle=True, **kwargs
+        train_dataset,
+        batch_size=batch_size,
+        sampler=train_sampler,
+        num_workers=4,
+        pin_memory=True,
     )
+
     test_loader = DataLoader(
-        test_dset, batch_size=batch_size, shuffle=False, **kwargs
+        test_dataset,
+        batch_size=batch_size,
+        num_workers=4,
+        pin_memory=True,
     )
 
-    return train_loader, test_loader
-
-
-def make_meta_loaders(batch_size=64, train_ratio=0.8):
-    dataset = make_dataset(train=True)
-
-    train_size = int(len(dataset) * train_ratio)
-    test_size = len(dataset) - train_size
-
-    train_dset, test_dset = torch.utils.data.random_split(
-        dataset, [train_size, test_size]
+    meta_train_loader = DataLoader(
+        valid_dataset,
+        batch_size=meta_batch_size,
+        sampler=train_sampler,
+        num_workers=4,
+        pin_memory=True,
     )
 
-    kwargs = {'num_workers': 0, 'pin_memory': True}
-
-    train_loader = DataLoader(
-        train_dset, batch_size=batch_size, shuffle=True, **kwargs
+    meta_test_loader = DataLoader(
+        valid_dataset,
+        batch_size=meta_batch_size,
+        sampler=valid_sampler,
+        num_workers=4,
+        pin_memory=True,
     )
-    test_loader = DataLoader(
-        test_dset, batch_size=batch_size, shuffle=True, **kwargs
-    )
 
-    return train_loader, test_loader
+    return train_loader, test_loader, meta_train_loader, meta_test_loader
 
 
 class MetaTrainer(object):
     def __init__(
         self, model, init_lr, momentum, weight_decay, batch_size,
-        meta_batch_size, meta_num_train_steps, meta_num_test_steps, meta_grad_clip, anneal_gamma, device
+        meta_batch_size, meta_num_train_steps, meta_num_test_steps,
+        meta_grad_clip, split_ratio, device
     ):
         super().__init__()
 
         self.model = model.to(device)
 
-        #self.meta_update_freq = meta_update_freq
-        #self.meta_num_updates = meta_num_updates
         self.meta_num_train_steps = meta_num_train_steps
         self.meta_num_test_steps = meta_num_test_steps
         self.meta_grad_clip = meta_grad_clip
-        self.anneal_gamma = anneal_gamma
         self.device = device
-        self.unroll_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+        
         param_groups = [
             {
                 'params': p,
@@ -150,56 +169,69 @@ class MetaTrainer(object):
         )
 
         self.learnable_lr = higher.optim.get_trainable_opt_params(
-            self.opt, device=self.unroll_device
+            self.opt, device=self.device
         )['lr']
         self.lr_opt = optim.Adam(self.learnable_lr)
 
-        self.train_loader, self.test_loader = make_loaders(batch_size)
-        self.meta_train_loader, self.meta_test_loader = make_meta_loaders(
-            meta_batch_size
+        self.train_loader, self.test_loader, self.meta_train_loader, self.meta_test_loader = make_loaders(
+            batch_size, meta_batch_size, split_ratio=split_ratio
         )
+
+        #self.train_loader, self.test_loader = make_loaders(batch_size)
+        #self.meta_train_loader, self.meta_test_loader = make_meta_loaders(
+        #    meta_batch_size
+        #)
 
     def meta_train_iter(self, step, epoch, L):
         self.model.train()
         self.lr_opt.zero_grad()
         start_time = time.time()
         with higher.innerloop_ctx(
-                self.model,
-                self.opt,
-                copy_initial_weights=True,
-                track_higher_grads=True,
-                device=self.unroll_device,
-                override={'lr': self.learnable_lr}
+            self.model,
+            self.opt,
+            copy_initial_weights=True,
+            track_higher_grads=True,
+            device=self.device,
+            override={'lr': self.learnable_lr}
         ) as (fmodel, diffopt):
             train_loss = 0
             for i, (train_x, train_y) in enumerate(self.meta_train_loader):
                 if i >= self.meta_num_train_steps:
                     break
-                train_x, train_y = train_x.to(self.unroll_device), train_y.to(self.unroll_device)
+                train_x, train_y = train_x.to(self.device), train_y.to(
+                    self.device
+                )
                 # meta train step
                 train_y_hat = fmodel(train_x)
                 loss = F.cross_entropy(train_y_hat, train_y)
                 train_loss += loss
                 diffopt.step(train_loss)
-                
+
             test_loss = 0
             for i, (test_x, test_y) in enumerate(self.meta_test_loader):
                 if i >= self.meta_num_test_steps:
                     break
-                test_x, test_y = test_x.to(self.unroll_device), test_y.to(self.unroll_device)
+                test_x, test_y = test_x.to(self.device
+                                           ), test_y.to(self.device)
                 # meta test step
                 test_y_hat = fmodel(test_x)
                 test_loss += F.cross_entropy(test_y_hat, test_y)
-                
+
             if self.meta_num_test_steps > 0:
                 test_loss.backward()
-                
-            L.log('meta/train_loss', train_loss.item() / self.meta_num_train_steps , step)
-            L.log('meta/test_loss', test_loss.item() / self.meta_num_test_steps , step)
+
+                L.log(
+                    'meta/train_loss',
+                    train_loss.item() / self.meta_num_train_steps, step
+                )
+                L.log(
+                    'meta/test_loss',
+                    test_loss.item() / self.meta_num_test_steps, step
+                )
 
         torch.nn.utils.clip_grad_norm_(self.learnable_lr, self.meta_grad_clip)
         self.lr_opt.step()
-            
+
         # set minimum lr
         for lr in self.learnable_lr:
             lr.data.clamp_min_(0.001)
@@ -210,7 +242,9 @@ class MetaTrainer(object):
         )
         lrs = np.array([lr.item() for lr in self.learnable_lr])
         L.log_histogram('meta/learning_rate', lrs, step)
-        
+        for i, lr in enumerate(lrs):
+            L.log('train/lr_%d' % i, lr, step)
+
         L.log('meta/duration', time.time() - start_time, step)
         L.log('meta/epoch', epoch, step)
         L.dump(step)
@@ -247,13 +281,6 @@ class MetaTrainer(object):
 
         return step
 
-    def anneal_lr(self, epoch):
-        if epoch in [150, 225]:
-            for lr in self.learnable_lr:
-                lr.data.mul_(self.anneal_gamma)
-            # reset adam
-            self.lr_opt = optim.Adam(self.learnable_lr)
-
     def test_iter(self, step, epoch, L):
         self.model.eval()
         for x, y in self.test_loader:
@@ -275,9 +302,7 @@ class MetaTrainer(object):
         for epoch in range(1, num_epochs + 1):
             step = self.train_iter(step, epoch, L)
             self.test_iter(step, epoch, L)
-
             self.meta_train_iter(step, epoch, L)
-            self.anneal_lr(epoch)
 
 
 def main():
@@ -310,7 +335,7 @@ def main():
         meta_num_train_steps=args.meta_num_train_steps,
         meta_num_test_steps=args.meta_num_test_steps,
         meta_grad_clip=args.meta_grad_clip,
-        anneal_gamma=args.anneal_gamma,
+        split_ratio=args.split_ratio,
         device=device
     )
 
