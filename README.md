@@ -14,15 +14,11 @@ source activate pytorch_env
 To train an SAC+AE agent on the `cheetah run` task from image-based observations  run:
 ```
 python train.py \
-    --domain_name cheetah \
-    --task_name run \
-    --encoder_type pixel \
-    --decoder_type pixel \
-    --action_repeat 4 \
-    --save_video \
-    --save_tb \
     --work_dir ./log \
-    --seed 1
+    --meta_batch_size 16 \
+    --meta_num_train_steps 10 \
+    --meta_num_test_steps 10 \
+    --split_ratio 0.01
 ```
 This will produce 'log' folder, where all the outputs are going to be stored including train/eval logs, tensorboard blobs, and evaluation episode videos. One can attacha tensorboard to monitor training by running:
 ```
