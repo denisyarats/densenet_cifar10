@@ -38,4 +38,5 @@ D - duration
 L - loss
 A - accuracy
 ```
-There will be similar entries from test and meta iterations.
+There will be similar entries from test and meta iterations. Below is the accuracy compasison for three runs: fixed learning rate, manually annealed, and learned with higher.
+![experiment](figure.png)
