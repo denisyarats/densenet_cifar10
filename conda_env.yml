@@ -1,0 +1,11 @@
+name: pytorch_evn
+channels:
+  - defaults
+dependencies:
+  - python=3.6
+  - pytorch
+  - torchvision
+  - cudatoolkit=9.2
+  - pip:
+    - termcolor
+    - tb-nightly
