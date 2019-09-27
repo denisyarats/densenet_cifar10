@@ -18,7 +18,7 @@ from logger import Logger
 import densenet
 import higher
 
-DATA_FOLDER = './'
+DATA_FOLDER = './data'
 
 
 def make_dir(dir_path):
