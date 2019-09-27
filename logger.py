@@ -14,7 +14,6 @@ FORMAT_CONFIG = {
         'train': [
             ('step', 'T', 'int'), ('epoch', 'E', 'int'), ('duration', 'D', 'time'),
             ('loss', 'L', 'float'), ('accuracy', 'A', 'float'),
-            ('learning_rate', 'LR', 'float')
         ],
         'test': [
             ('step', 'T', 'int'), ('epoch', 'E', 'int'), ('loss', 'L', 'float'),
