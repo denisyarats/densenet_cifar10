@@ -1,3 +1,5 @@
+# This conde is taken from: https://github.com/bamos/densenet.pytorch
+
 import torch
 
 import torch.nn as nn
